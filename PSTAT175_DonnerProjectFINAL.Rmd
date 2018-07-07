@@ -1,0 +1,665 @@
+---
+title: "Donner Party Survival Analysis"
+author: "Joshua Barney, Emeric Szaboky, Kieren Patel, Bridget Haus"
+date: "November 25, 2016"
+output:
+  pdf_document: default
+  word_document: default
+---
+
+#### R Markdown
+
+# Introduction
+
+The dataset we will be using for our survival data analysis comes from the University of Florida archives of Miscellaneous Datasets. This dataset consists of 89 members of the Donner Party from 1846-1847. We designed a new variable called duration which is the time until event, calculated by subtracting the join date from the death date (with the mean duration inserted for missing censored values). We also designed 3 more variables named famsize (size of nuclear family), groupsize (size of group including teamsters), and isteamster (indicator function whether subject is a teamster or not). We are censoring all observations who survived the donner party tragedy. Since many of our findings are censored we will have to adjust our findings accordingly.
+
+Our goal for this survival data analysis is to see whether the covariates age, sex, famsize, groupsize, camp, trapped, and isteamster had an impact on the survival of an observed donner party member. We will proceed with Kaplan-Meier plots, log-rank tests, log-log plots, Cox (proportional hazard) regression models with confidence intervals, AIC to find the best fit model, and random survival forests to support our findings and conclusions. The Kaplan-Meier plots will be used to visualize the survival rates of donner party members with differing covariates. The log-rank tests will be used to test if there is a difference between two or more of our survival curves. The Cox regression models will be used to test the proportional hazards model assumptions to see which coefficients for each covariate has the most statistical significance in predicting the evolving survival proabability for different groups. The random survival forests will be used to find an alternative, non-parametric survival probability prediction model through supervised learning techniques. This model will allow us to ignore parametric constraints imposed by the Cox regression models. Additionally, we will allow for more abstract relationships between covariates.
+
+## Donner Party Background
+
+### Milford Elliott: Cannibalism 
+
+We found additional data that Milford Elliott, a man, age 28, who died Februrary 9th, 1847, was most likely the first person in the donner party to be canabalized. There was also a significant number of people, trapped in the mountains (correlating to a 1 for the 'trapped' covariate), who died during February and March of 1847 (many more died in February and March as opposed to the suspected winter months of December and January). This evidence could suggest that after the canabalism of Elliott, food rations were low, and many of the surviving people were sacrificed as food. Further evidence for this is shown in the Kaplan-Meier plot controlled for the 'trapped' covariate, since many of the members of the Donner Party trapped in the mountains survived longer than those not trapped. This was concerning at first, however, with analysis, we found it could suggest many of the trapped people who died early were sacrificed in order to help the rest of the trapped people survive.
+
+### "The Forlorn Hope"
+
+"The Forlorn Hope" was a party within the Donner Party of 17 men, women, and children who set out on foot in the snow (12 ft. deep) to cross the mountain pass when food rations became low. They became trapped in the mountains without food. Eventually, debate arose about sacrificing people in the party to feed the others, and it was decided that the party would wait until people fell or died on their own before anyone was eaten. Antonio, a teamster, and Franklin Graves were the first two members of the party to die. Patrick Dolan and Lemuel Murphy died next. They were preserved as food. The party agreed to not allow people to eat their own relatives; this information could provide evidence for why the children and women (wives) had better survival rates than the men. Families were cherished and protected before single individuals. This is supported in the Kaplan-Meier plots, which illustrate women and children having significantly stronger survival rates. 
+
+The Miwok Native American mountain guides Salvador and Luis, along with William Eddy refused to eat human flesh. The party members discussed killing Salvador and Luis for food, however William Eddy warned them, and the two men were able to escape. The party found Salvador and Luis near death several days later and killed them for food. 
+
+William Eddy was led out of the mountains by a Miwok Native American whom the party had met on their journey. He was able to haphazardly organize a rescue party to save the other remaining six members of "The Forlorn Hope". These survivors are documented in the data with the rescue 'party' covariate value of 0 (0 attributed to survival without rescue) because they were able to make it almost all the way out of the mountains without dying on their own.   
+
+William Eddy was later an integral member of the first rescue party ('party' covariate value of 1).
+
+### James Reed
+
+James Reed, 45, was banished from the Donner Party and made it out of the mountains alive on his own. He was an integral part of the second rescue party ('party' covariate value of 2). It was an anomaly that all of the members of the Reed family survived.
+
+
+# Setup: Read In And Organize Data
+
+```{r}
+# Read in original data
+donner <- read.csv("~/Desktop/PSTAT 175/group project/donner.txt", header=FALSE, sep=";")
+
+# Assign covariate names
+names <- donner$V1
+age <- donner$V2
+sex <- donner$V3
+survive <- donner$V4
+deathdate <- donner$V5
+party <- donner$V6
+joindate <- donner$V7
+trapped <- donner$V8
+camp <- donner$V9
+
+# Family Size
+famsize <- c(rep(7,7),rep(9,9),rep(1,3),rep(6,6),2,2,rep(1,3),
+             rep(9,9),1,rep(4,4),rep(13,13),rep(4,4),1,1,2,2,1,1,
+             rep(3,3),rep(12,12),rep(1,7))
+
+# Traveling Group Size (Including Teamsters)
+groupsize <- c(rep(26,19),rep(11,11),rep(10,10),rep(4,4),rep(13,13),rep(6,4),25,6,
+               2,2,25,6,rep(3,3),rep(13,13),rep(25,4),2,2)
+
+# Indicator vector for whether or not the subject was a teamster
+isteamster <- c(rep(0,16),rep(1,3),rep(0,6),rep(1,5),rep(0,9),1,rep(0,21),1,1,
+                0,0,1,1,rep(0,15),rep(1,7))
+
+# Trim out whitespace and convert to date format
+joindate <- trimws(joindate)
+joindate <- as.Date(joindate, "%m/%d/%Y")
+
+deathdate <- trimws(deathdate)
+deathdate <- as.Date(deathdate, "%m/%d/%Y")
+
+# New vector of the amount of days the subject was in the party for
+duration <- as.numeric(deathdate - joindate)
+
+# Ammend duration vector by filling in missing observations with column mean (176)
+duration <- as.numeric(duration)
+duration[is.na(duration)] <- 
+  round(mean(duration, na.rm = T))
+
+# Reformat the "survive" variables
+survive <- (1-survive)
+
+# Reformat the Camp Variable
+camp <- as.character(camp)
+camp[camp != "AC" & camp != "LC"] <- "None"
+camp <- as.factor(camp)
+
+# Create final dataset
+data <- data.frame(names, age, sex,
+                          survive, deathdate, 
+                          party, joindate,
+                          trapped, camp, duration,
+                          famsize, groupsize, isteamster)
+```
+
+
+# Kaplan-Meier Plots
+
+## General Kaplan-Meier
+
+```{r}
+library(survival)
+
+donner.surv <- Surv(duration, survive)
+donner.fit <- survfit(donner.surv~1)
+plot(donner.fit, conf.int=FALSE, xlab="Time", ylab="Survival", main="Donner Kaplan-Meier Survival Plot")
+```
+\begin{center}
+This plot describes the survival probability of all subjects across time. 
+\end{center}
+
+## Kaplan-Meier With Respect To Isteamster
+
+```{r}
+donner.split.isteamster <- survfit(donner.surv ~ isteamster)
+
+plot(donner.split.isteamster, conf.int=FALSE, main="Kaplan-Meier Survival Plot by Isteamster", xlab="Time", ylab="Survival Probability",lwd=1,col=c("red","green"),mark.time=TRUE,mark=18)
+legend("bottomleft",c("Is not teamster","Is teamster"),fill=c("red","green"),bty="n")
+```
+\begin{center}
+This plot describes the survival probability of teamster and non-teamster subjects across time.
+\end{center}
+
+\begin{center}
+The plot above illustrates teamsters having a worse survival rate than those who were not teamsters. This could potentially be explained by the fact that teamsters had to exert more of their energy than non-teamsters to take care of other creatures. Even more plausible could be the fact that teamsters were often single men without families, and thus more likely to be cannibalized early on. This is supported by the Kaplan-Meier plot for sex showing men with lower survival rates than women. It is also supported by background information on the Donner Party occurences and in the Cox proportional hazards strongest model by the interaction between the covariates sex and trapped. 
+\end{center}
+
+## Kaplan-Meier With Respect To Trapped In Mountains
+
+```{r}
+donner.split.trap <- survfit(donner.surv ~ trapped)
+
+plot(donner.split.trap,conf.int=FALSE,main="Kaplan-Meier Survival Plot by Trapped in Mountains",xlab="Time",ylab="Survival Probability",lwd=1,col=c("palevioletred1","springgreen1"),mark.time=TRUE,mark=18)
+legend("bottomleft",c("Not Trapped","Trapped"),fill=c("palevioletred1","springgreen1"),bty="n")
+```
+\begin{center}
+This plot describes the survival probability of trapped and not-trapped subjects across time.
+\end{center}
+
+\begin{center}
+The plot above illustrates those trapped in the mountains having better survival rates than those not trapped. This discrepancy is in large part due to a significantly smaller number of people having not been trapped in the mountains. The data does not provide an strongly accurate comparison between trapped and not trapped since the sizes of observations for each are so vastly different. Another reason for this relationship could be that both groups ran out of food rations around similar times and those trapped in the mountains resorted sooner to cannibalism, which kept many who were trapped surviving longer.
+\end{center}
+
+## Kaplan-Meier With Respect To Sex
+
+```{r}
+donner.split.sex <- survfit(donner.surv ~ sex)
+
+plot(donner.split.sex,conf.int=FALSE,main="Kaplan-Meier Survival Plot by Sex",xlab="Time",ylab="Survival Probability",lwd=1,col=c("magenta","blue"),mark.time=TRUE,mark=18)
+legend("bottomleft",c("Men","Women"),fill=c("blue","magenta"),bty="n")
+```
+\begin{center}
+This plot describes the survival probability of male and female subjects across time.
+\end{center}
+
+\begin{center}
+The plot above illustrates females having better survival rates than males. This is largely due to respect for familial relations among members of the Donner Party and the effort that was given to not separate nuclear families or cannibalize women, children, and men with families. Single men (bachelors) had a much lower survival rate and a high hazard risk of being cannibalized.
+\end{center}
+
+## Kaplan-Meier With Respect To Age
+
+```{r}
+table <- within(data, quartile <- as.integer(cut(age, quantile(age, probs=0:3/3), include.lowest=TRUE)))
+q6 <- as.factor(table$quartile)
+
+donner.split.age <- survfit(donner.surv ~ q6)
+plot(donner.split.age,conf.int=FALSE,main="Kaplan-Meier Survival Plot by Age",xlab="Time",ylab="Survival Probability",lwd=1,col=c("red","black","purple"),mark.time=TRUE,mark=18)
+legend("bottomleft",c("Children","Teens","Adults"),fill=c("red","black","purple"),bty="n")
+```
+\begin{center}
+This plot describes the survival probability children, teen, and adult subjects across time.
+\end{center}
+
+\begin{center}
+The plot above illustrates children having the best survival rates for the majority of the recorded observations in time. There were a few adults, however, that survived longer than any children or teens. Teens and adults have relatively similar survival curves with the average survival rate for teens appearing lower than that of adults. The strong rate of survival of children is most likely due to the fact that they were cared for by adults and rescued earlier on. Teens could have had a higher hazard rate than adults because they were weaker or because they were single and more likely to be cannibalized. 
+\end{center}
+
+## Kaplan-Meier With Respect To Camp
+
+```{r}
+donner.split.camp <- survfit(donner.surv ~ camp)
+
+plot(donner.split.camp,conf.int=FALSE,main="Kaplan-Meier Survival Plot by Camp",xlab="Time",ylab="Survival Probability",lwd=1,col=c("orange","green","cyan"),mark.time=TRUE,mark=18)
+legend("bottomleft",c("AC","LC","No Camp"),fill=c("orange","green","cyan"),bty="n")
+```
+\begin{center}
+This plot describes the survival probability of Alden Creek, Lake Camp, and no camp subjects across time.
+\end{center}
+
+\begin{center}
+The plot above illustrates those from camp AC having the best survival rate, followed by LC, and then by No Camp.  Subjects who weren't trapped generally belonged to no camp. 
+\end{center}
+
+
+# Cox Proportional Hazards Models With Confidence Intervals
+
+## Difference Between Sexes
+
+```{r}
+difference_sexes <- coxph(donner.surv ~ sex, data = data)
+summary(difference_sexes)
+```
+\begin{center}
+We reject the null hypothesis that the sex covariate is not significant. From the likelihood-ratio test, we have a p-value of 0.0004208 < alpha-level = 0.05. Therefore there is a significant difference between male and female. In addition, the p-value for the sex covariate is 0.00208 < alpha-level = 0.05, suggesting that in this model with the single covariate sex, sex is significant.
+\end{center}
+
+```{r}
+extractAIC(difference_sexes)
+```
+\begin{center}
+1 covariate; AIC = 252.9325
+\end{center}
+
+## Difference Between Sexes; Controlled For All Other Covariates
+
+```{r}
+## 1 ##
+difference_controlled <- coxph(donner.surv ~ sex+age+trapped+famsize+groupsize+isteamster, data = data)
+summary(difference_controlled)
+# LRT1: p-value = p=1.209e-07
+# significant covariates for model: sex, groupsize, isteamster
+
+extractAIC(difference_controlled)
+# 6 covariates; AIC(1) = 232.4491
+
+## 2 ##                
+all_except_sex <- coxph(donner.surv ~ age+trapped+famsize+groupsize+isteamster, data = data)
+summary(all_except_sex) 
+# LRT2: p-value = 3.567e-07
+# significant covariates for model: trapped, groupsize, isteamster
+
+# LRT1 - LRT2 = 42.92 - 38.12 = 4.8 ; df1 - df2 = 6 - 5 = 1
+
+pchisq(4.8,1,lower.tail = F)
+# from pchisq(4.8,1, lower.tail = F) : 
+# ^found that df=1, LRT1 - LRT2= 4.8 correlates to an approximate p-value = 0.02845974
+
+extractAIC(all_except_sex)
+# 5 covariates; AIC(2) = 235.24827
+```
+\begin{center}
+P-value (sex covariate) = 0.02845974 (rounds to 0.03) 
+AIC(1) = 6 covariates; 232.4491
+AIC(2) = 5 covariates; 235.24827
+
+Because 0.02845974 < alpha-level = 0.05, we reject the null hypothesis that there is not a significant difference between males and females when controlling for all other covariates. Therefore, there is a significant difference between males and females in this case. 
+\end{center}
+
+## Searching For The Strongest Model: Difference Between Sexes; Adjusted For Significance 
+
+```{r}
+difference_controlled_adj <- coxph(donner.surv ~ sex+trapped+groupsize+isteamster, data = data)
+summary(difference_controlled_adj)
+# LRT: p-value = 1.107e-08
+# significant covariates for model: sex, groupsize, isteamster
+```
+\begin{center}
+We reject the null hypothesis that this model is not significant. From the likelihood-ratio test, we have a p-value of 1.107e-08 < alpha-level = 0.05. Therefore, the model is significant and there is a significant difference between males and females. In addition, the p-value for the sex covariate is 0.03838 < alpha-level = 0.05, suggesting that in this model with four covariates, sex is still significant.
+\end{center}
+
+```{r}
+extractAIC(difference_controlled_adj)
+```
+\begin{center}
+4 covariates; AIC = 228.5112
+
+After thorough testing through step-wise model selection, we found that the above model, difference-controlled-adj, possessing the lowest AIC value of 228.5112 is the strongest model. In this model, three (sex, groupsize, isteamster) out of four covariates are significant. Although the trapped covariate is not significiant, including it in the model lowers the AIC. This suggests that there is some interaction between the trapped covariate and another covariate which lowers this value. The p-value for the sex covariate is affected largely by the addition of the trapped covariate to the model. Both the sex and trapped covariates are significant when tested alone in single-covariate models. This may suggest a relationship between the sex and trapped covariates. With contextual analysis, a relationship between these two covariates could make sense, considering the lives of many women who were trapped in the mountains were spared before the lives of men trapped in the mountains. This trend is visualized in the Kaplan-Meier plot and is explained in the background information to be due to the family life component of men taking care of their nuclear families before themselves. There was a significant amount of respect amongst the members of the Donner Party for families; this is why the survival rates of families were higher than those of single men and why single men were often the first to be cannibalized. We will assume that the trapped covariate has some positive effect on the results. 
+\end{center}
+
+## Further Reduced Model To Prove Removing Trapped Covariate Raises AIC
+
+```{r}
+coxph_reduced_signif <- coxph(donner.surv ~ sex+groupsize+isteamster, data = data)
+summary(coxph_reduced_signif)
+# LRT: p-value = 1.035e-08
+# significant covariates for model: all (sex, groupsize, isteamster)
+
+extractAIC(coxph_reduced_signif)
+```
+\begin{center}
+3 covariates; AIC = 229.3102
+
+The p-values from stepwise AIC tell whether the two nested models differ significantly. According to AIC, the difference-controlled-adj is the strongest model with the following variables: sex, trapped, groupsize, isteamster. We cross-validated this model by removing one insignificant covariate at a time until all covariates in the model had significant p-values. In the above coxph-reduced-signif model, the insignificant trapped covariate is removed. Although all covariates (sex, groupsize, isteamster) have significant p-values, the AIC is larger than the AIC for the difference-controlled-adj model. This leads us to accept difference-controlled-adj as the strongest model.
+\end{center}
+
+## Confidence Interval for Hazard Probability Ratio
+
+```{r}
+# We concluded our best model was the following:
+
+difference_controlled_adj <- coxph(donner.surv ~ sex+trapped+groupsize+isteamster, data = data)
+summary(difference_controlled_adj)
+
+# A 95% confidence interval for the Male Sex coefficient is
+
+1.00080 - 1.96*0.48330
+1.00080 + 1.96*0.48330
+
+# Thus the 95% confidence interval for hazard ratio of Male Sex relative to Female Sex is
+
+exp(0.053532)
+exp(1.948068)
+```
+\begin{center}
+Our confidence interval for the Male Sex relative to Female Sex hazard ratio is (1.001782,7.023418) therefore we would conclude that there is a significant difference between the two sexes with Male Sex having a greater hazard rate and therefore a shorter lifetime.
+\end{center}
+
+# Log-Rank Tests & Log-Log Plots
+
+## Log-Rank Tests
+
+For the following log-rank tests, we will assume the following null and alternative hypotheses:
+\begin{center}
+$$ H_0: coefficient-for-tested-variable-equals-zero $$ vs. $$ H_a: coefficient-for-tested-variable-does-not-equal-zero. $$
+\end{center}
+
+### Sex
+```{r}
+(donner.sex.lr <- survdiff(donner.surv ~ sex, data=data))
+# Sex is significant: Chisq= 10.9 on 1 df, p-value = 0.000962 < alpha-level = 0.05
+```
+
+### Trapped (In Mountains)
+```{r}
+(donner.trapped.lr <- survdiff(donner.surv ~ trapped, data=data))
+# Trapped is significant: Chisq= 18.7 on 1 df, p= 1.53e-05  < alpha-level = 0.05
+```
+
+### Age
+
+```{r}
+age<- as.numeric(age)
+age <- findInterval(age, c(0, 10, 26))
+age[age == 1] <- "Under 10"
+age[age == 2] <- "10 - 26"
+age[age == 3] <- "Over 26"
+age <- as.factor(age)
+
+(donner.age.lr <- survdiff(donner.surv ~ age))
+# Age is NOT significant: Chisq= 3.9  on 2 df, p-value = 0.143 > alpha-level = 0.05
+```
+
+### Famsize
+
+```{r}
+sizegroups <- findInterval(famsize, c(0, 5, 10))
+sizegroups[sizegroups == 1] <- "Small"
+sizegroups[sizegroups == 2] <- "Medium"
+sizegroups[sizegroups == 3] <- "Large"
+
+(donner.famsize.lr <- survdiff(donner.surv ~ sizegroups))
+# Famsize is significant: Chisq= 28  on 2 df, p-value = 8.46e-07 < alpha-level = 0.05
+```
+
+### Groupsize
+
+```{r}
+groupsize <- findInterval(groupsize, c(0, 11, 20))
+groupsize[groupsize == 1] <- "Small"
+groupsize[groupsize == 2] <- "Medium"
+groupsize[groupsize == 3] <- "Large"
+
+(donner.groupsize.lr <- survdiff(donner.surv ~ groupsize))
+# Groupsize is NOT significant: Chisq= 3.4  on 2 df, p-value = 0.183 > alpha-level = 0.05
+```
+
+### Isteamster
+
+```{r}
+(donner.isteamster.lr <- survdiff(donner.surv ~ isteamster))
+# Isteamster is significant: Chisq= 33.3  on 1 df, p-value = 7.9e-09 < alpha-level = 0.05
+```
+
+### Joindate
+
+```{r}
+joindate <- as.character(joindate)
+joindate[joindate != "1846-07-19"] <- "After July 1846"
+joindate[joindate == "1846-07-19"] <- "July 1846"
+joindate <- as.factor(joindate)
+
+(donner.joindate.lr <- survdiff(donner.surv ~ joindate))
+# Joindate is NOT significant: Chisq= 2.9  on 1 df, p-value = 0.0895 > alpha-level = 0.05
+```
+
+### Camp
+
+```{r}
+(donner.camp.lr <- survdiff(donner.surv~camp))
+# Camp is significant:  Chisq= 15.5  on 2 df, p-value = 0.000424 < alpha-level = 0.05 
+```
+\begin{center}
+After performing Log-Rank tests on each of our covariates, we conclude that our significant variables at the 0.05 level are: sex, trapped, famsize, isteamster and camp. Continous covariates were broken into factors of 2 to 3 levels so as to give more reasonable results.
+\end{center}
+
+
+## Stratified Tests
+
+### Stratified On Sex
+
+```{r}
+# Stratified on sex, all variables are significant 
+(survdiff(donner.surv~strata(sex) + age))
+(survdiff(donner.surv~strata(sex) + sizegroups))
+(survdiff(donner.surv~strata(sex) + isteamster))
+(survdiff(donner.surv~strata(sex) + trapped))
+(survdiff(donner.surv~strata(sex) + camp))
+```
+
+### Stratified On Famsize
+
+```{r}
+# Stratified on famsize, only trapped, isteamster, and sex are significant 
+
+# Significant
+(survdiff(donner.surv~strata(sizegroups) + trapped))
+(survdiff(donner.surv~strata(sizegroups) + isteamster))
+(survdiff(donner.surv~strata(sizegroups) + sex))
+# NOT significant
+(survdiff(donner.surv~strata(sizegroups) + age))
+(survdiff(donner.surv~strata(sizegroups) + camp))
+```
+
+### Stratified On Age
+
+```{r}
+# Stratified on age, all variables are significant
+(survdiff(donner.surv~strata(age) + isteamster))
+(survdiff(donner.surv~strata(age) + trapped))
+(survdiff(donner.surv~strata(age) + sizegroups))
+(survdiff(donner.surv~strata(age) + sex))
+(survdiff(donner.surv~strata(age) + camp))
+```
+
+### Stratified On Camp
+
+```{r}
+# Stratified on camp, all variables are significant 
+(survdiff(donner.surv~strata(camp) + isteamster))
+(survdiff(donner.surv~strata(camp) + trapped))
+(survdiff(donner.surv~strata(camp) + sizegroups))
+(survdiff(donner.surv~strata(camp) + sex))
+(survdiff(donner.surv~strata(camp) + age))
+```
+
+### Stratified on isteamster
+
+```{r}
+# Stratified on isteamster, age is not significant 
+
+# Significant
+(survdiff(donner.surv~strata(isteamster) + trapped))
+(survdiff(donner.surv~strata(isteamster) + sizegroups))
+(survdiff(donner.surv~strata(isteamster) + sex))
+(survdiff(donner.surv~strata(isteamster) + camp))
+# NOT significant 
+(survdiff(donner.surv~strata(isteamster) + age))
+```
+
+### Stratified on Trapped
+
+```{r}
+# Stratified on trapped, all other variables are still significant, except camp
+
+# Significant
+(survdiff(donner.surv~strata(trapped) + age))
+(survdiff(donner.surv~strata(trapped) + sizegroups))
+(survdiff(donner.surv~strata(trapped) + isteamster))
+(survdiff(donner.surv~strata(trapped) + sex))
+# NOT significant
+(survdiff(donner.surv~strata(trapped) + camp))
+```
+
+\begin{center}
+From our stratified log-rank tests, we see that age is not significant when stratified on isteamster and famsize, and is barely significant at the 0.05 level when stratified on trapped. We aso see that camp is not significant when stratified on famsize and trapped. From this information, we can see that age may not be something we wish to include in our model, but as for camp being insignificant when stratified on trapped, we can assume that this is due to the the fact that subjects who weren't trapped generally belonged to no camp. 
+\end{center}
+
+## Log-Log Plots
+
+# Sex
+
+```{r}
+plot(survfit(donner.surv ~ sex), col=c("red", "blue"), xlab="Time", ylab="Survival Probability",
+     main="Log-Log Plot: Sex", fun="cloglog")
+legend("topleft",c("Female", "Male"), fill = c("red", "blue"))
+```
+\begin{center}
+The curves intersect at ~225 days, suggesting a violation of the PH assumptions.
+\end{center}
+
+# Isteamster
+
+```{r}
+isteamster <- as.factor(isteamster)
+plot(survfit(donner.surv ~ isteamster), col=c("red", "blue"), xlab="Time", ylab="Survival Probability",
+     main="Log-Log Plot: Teamstership", fun="cloglog")
+legend("topleft",c("Not Teamster", "Teamster"), fill = c("red", "blue"))
+```
+\begin{center}
+The curves do not violate the PH assumptions.
+\end{center}
+
+# Age
+
+```{r}
+plot(survfit(donner.surv ~ age), col=c("red", "blue", "green"), xlab="Time", ylab="Survival Probability",
+     main="Log-Log Plot: Age", fun="cloglog")
+legend("topleft",c("10-26", "Over 26", "Under 10"), fill = c("red", "blue", "green"))
+```
+\begin{center}
+All 3 the curves intersect with at least one of the others, and thus violate the PH assumptions.
+\end{center}
+
+# Famsize
+
+```{r}
+sizegroups <- as.factor(sizegroups)
+plot(survfit(donner.surv ~ sizegroups), col=c("red", "blue", "green"), xlab="Time", ylab="Survival Probability",
+     main="Log-Log Plot: Family Size", fun="cloglog")
+legend("topleft",c("Large", "Medium", "Small"), fill = c("red", "blue", "green"))
+```
+\begin{center}
+The curves do not violate the PH assumptions.
+\end{center}
+
+# Groupsize
+
+```{r}
+groupsize <- as.factor(groupsize)
+plot(survfit(donner.surv ~ groupsize), col=c("red", "blue", "green"), xlab="Time", ylab="Survival Probability",
+     main="Log-Log Plot: Group Size", fun="cloglog")
+legend("topleft",c("Large", "Medium", "Small"), fill = c("red", "blue", "green"))
+```
+\begin{center}
+All 3 the curves intersect with each other and therefore violate the PH assumptions. 
+\end{center}
+
+# Trapped (In Mountains)
+
+```{r}
+trapped <- as.factor(trapped)
+plot(survfit(donner.surv ~ trapped), col=c("red", "blue"), xlab="Time", ylab="Survival Probability",
+     main="Log-Log Plot: Trapped", fun="cloglog")
+legend("topleft",c("Not Trapped", "Trapped"), fill = c("red", "blue"))
+```
+\begin{center}
+The curves do not violate the proportional hazards assumptions.
+\end{center}
+
+# Camp
+
+```{r}
+plot(survfit(donner.surv ~ groupsize), col=c("red", "blue", "green"), xlab="Time", ylab="Survival Probability",
+     main="Log-Log Plot: Camp", fun="cloglog")
+legend("topleft",c("None", "Alden Creek", "Lake Camp"), fill = c("red", "blue", "green"))
+```
+\begin{center}
+All 3 curves violate the proportional hazards assumptions.
+\end{center}
+
+\begin{center}
+From our log-log plots we see that the only significant covariates that don't violate the proportional hazards assumptions are: isteamster, famsize, and trapped. 
+\end{center}
+
+
+# Random Survival Forest
+
+```{r}
+data$deathdate<-NULL
+data$joindate<-NULL
+install.packages("Hmisc",repos = "http://cran.us.r-project.org")
+library(ggplot2)
+library(randomForestSRC)
+library(ggRandomForests)
+library(Hmisc)
+library(risksetROC)
+```
+\begin{center}
+We want to use a non-parametric model to predict the survival status of a subject during the median survival time. We will find the prediction error rate of the model and find the most important variables in the model.
+\end{center}
+
+```{r}
+rf <- rfsrc(Surv(duration,survive)~.,data=data, na.action = "na.impute",nimpute=1,ntree=83,importance=TRUE,tree.err=TRUE)
+rf
+plot(rf)
+plot(gg_error(rf))
+```
+\begin{center}
+Prediction error rate with the increased number of decision trees used for our model.
+\end{center}
+
+```{r}
+importance.rf <- sort(rf$importance,decreasing = T)
+importance.rf
+plot(gg_vimp(rf))
+```
+\begin{center}
+Famsize is the most important covariate in our random survival forest model. 
+\end{center}
+
+```{r}
+rf.predict <- predict(rf,data,type="prob")
+rf.predict
+```
+\begin{center}
+We want to compute the C Index (which is the area under the receiver operating characteristic) for our classification for the censored response variables (status). 
+\end{center}
+
+```{r}
+rcorr.cens(rf$predicted.oob,Surv(duration,survive))["C Index"]
+error.rate.rf=rf$err.rate[rf$ntree]
+error.rate.rf
+
+#ROC (Receiver operating characteristic) for true positive (TP) to false positive (FP)
+donner.ROC = risksetROC(Stime = data$duration, status = data$survive, 
+                        marker = rf$predicted.oob, 
+                        predict.time = median(data$duration), method = "Cox",
+                        main = paste("OOB Survival ROC Curve at t=",
+                                     median(data$duration)),lwd = 3, 
+                        col = "magenta")
+```
+\begin{center}
+The area under the curve is 0.6889838 which is the expected uniform arbitrary positive, ranked before a uniform arbitrary negative. 0.6889838 is an okay AUC value so this classification model is moderately effective at separating those who died before the median survival time against those who died after the median survival time. 
+\end{center}
+
+```{r}
+donner.ROC$AUC
+```
+
+
+# Conclusion
+
+To effectively analyze the demise of the Donner Party, we tested the covariates age, sex, famsize, groupsize, camp, trapped, and isteamster to see if these variables had an impact on the survival of an observed member. Using a combination of Cox regression and backwards AIC selection we determined our best model was difference-controlled-adj, a survival model in relation to sex, controlling for the covariates trapped, groupsize, and isteamster. This model produced the lowest AIC value of 228.5112. In the strongest model, there was a key relationship between the covariates, sex and trapped. Although the trapped covariate was insignficant, the relationship between sex and trapped resulted in a smaller AIC, when trapped was added. This led us to accept the model including sex, groupsize, isteamster, in addition to trapped as the strongest model. The relationship between the two covariates, sex and trapped, could be explained by familial relations influencing the survival rate of women trapped in the mountains. In the groups trapped in the mountains during the winter, considerable effort was taken to avoid separating families if unnecessary. Because of this, women were protected and single men (bachelors) and people with no familial connections were at higher hazard risk of being eaten. These trends are supported in the Kaplan-Meier plot for sex, which illustrates women having much better survival rates. According to our Log-Rank tests, we concluded that the variables sex, trapped, famsize, isteamster and camp all had an impact on the survival probability at a 0.05 significance. Next, we created log-log plots in order to check if proportional hazard assumptions were satisfied. The log-log plots for sex, age, groupsize, and camp contained curves that were not proportionally consistent over time and therefore did not satisfy the conditions of a proportional Cox model. Given that these models did not satisfy proportional hazard assumptions, we stratified each variable to recheck significance. Stratified on sex, age and camp, all variables remained significant. Because many of our covariates violated PH assumptions, we decided to implement a non-parametric approach by creating a random survival forest to test for significant variables. The most accurate model in predicting the survival status of a subject during the median survival time contained 83 trees. In the random survival forest model, famsize was the most important covariate in our prediction. In order to test the accuracy of our forest, an OOB error was calculated to measure the balance of false positives and true positives. Our AUC (area under the curve) was 0.6889838, which displays moderate effectiveness of our forest. In conclusion, many variables contributed to the survival probability of the Donner Party. Famsize may have reigned most significant because larger families could share rationings, take care of each other and provide emotional support. Females of the Donner Party may have been more likely to survive because they contain more body fat and a lower metabolic rate, making them more likely to survive disaster. 
+
+
+\begin{center}
+Works Cited
+\end{center}
+
+AIC Computation Reference:
+"Compute AIC in Survival Analysis (survfit/coxph)." StackOverflow, 2013. Web. 22 Nov. 2016. <http://stackoverflow.com/questions/19679183/compute-aic-in-survival-analysis-survfit-coxph>
+
+Background Information Reference:
+"Donner Party." Wikipedia. Web. 22 Nov. 2016. <https://en.wikipedia.org/wiki/Donner_Party>
+
+Text Reference:
+Ishwaran, Hemant, and Udaya B. Kogalur. "Random Survival Forests for R." 7.2 (2007): n. pag. Web. 22 Nov. 2016. <http://www.ccs.miami.edu/~hishwaran/papers/randomSurvivalForests.pdf>.
+
+Dataset Reference:
+"Members and Survival of the Donner Party." Journal of Statistical Education Data Archive. University of Florida, n.d. Web. 22 Nov. 2016. <http://www.stat.ufl.edu/~winner/data/donner.dat>.
+
+Richardson, Mary, Terry Wright, and Eric Daly. "Donner Party." Donner Party. WikiTree, 2008. Web. 22 Nov. 2016. <https://www.wikitree.com/wiki/Space:Donner_Party>.
+
+Background Information Reference:
+"The Donner Party." WikiTree. Web. 22 Nov. 2016. <https://www.wikitree.com/wiki/Space:Donner_Party>
+
+AIC/P-value Analysis Reference:
+"When I use AIC (akaike information criterion) to find the model of the best fit, do I need to consider p-values?" ResearchGate, 2013. Web. 22 Nov. 2016. <https://www.researchgate.net/post/When_I_use_AIC_akaike_information_criterion_to_find_the_model_of_the_best_fit_do_I_need_to_consider_p-values>
+
+R Packages References:
+randomSurvivalForest package (Ishwaran and Kogalur 2007)
